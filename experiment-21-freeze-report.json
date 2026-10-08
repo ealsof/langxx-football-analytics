@@ -1,0 +1,119 @@
+{
+  "experiment": "21",
+  "title": "Final Audit & Freeze",
+  "timestamp": "2026-10-08T13:05:03.919Z",
+  "checks": [
+    {
+      "check": "required_file",
+      "file": "football.db",
+      "status": "PASS"
+    },
+    {
+      "check": "required_file",
+      "file": "server.js",
+      "status": "PASS"
+    },
+    {
+      "check": "required_file",
+      "file": "evaluation-models.mjs",
+      "status": "PASS"
+    },
+    {
+      "check": "database_readonly",
+      "status": "PASS"
+    },
+    {
+      "check": "sqlite_integrity",
+      "status": "PASS"
+    },
+    {
+      "check": "table_structure",
+      "status": "PASS"
+    },
+    {
+      "check": "match_data_summary",
+      "status": "PASS",
+      "total": 760,
+      "finished": 119,
+      "future": 641
+    },
+    {
+      "check": "finished_score_completeness",
+      "status": "PASS"
+    },
+    {
+      "check": "future_score_leakage",
+      "status": "PASS",
+      "futureMatchesChecked": 641,
+      "zeroZeroPlaceholders": 641,
+      "suspiciousNonZeroScores": 0
+    },
+    {
+      "check": "kickoff_completeness",
+      "status": "PASS"
+    },
+    {
+      "check": "competition_coverage",
+      "status": "PASS"
+    },
+    {
+      "check": "model_hash",
+      "status": "PASS",
+      "sha256": "c65b85f4ea348148c0e458bdc314cd8f8327fe50246d632a4f0e80d136083881"
+    },
+    {
+      "check": "server_hash",
+      "status": "PASS",
+      "sha256": "8d8397842054710b578e20561d0869f175d376103a2c935a25bfad4132abbf0b"
+    },
+    {
+      "check": "production_v01_scan",
+      "status": "DIAGNOSTIC",
+      "markersFound": 2,
+      "markersExpected": 5
+    },
+    {
+      "check": "calibration_scan",
+      "status": "PASS"
+    },
+    {
+      "check": "recent10_scan",
+      "status": "PASS"
+    },
+    {
+      "check": "database_hash",
+      "status": "PASS",
+      "sha256": "156d999d69c53cda751da08d24f98bd077fc1d3b73e4fd348e839407d97a2751"
+    }
+  ],
+  "failures": [],
+  "warnings": [
+    "production_v01_marker_incomplete"
+  ],
+  "finalStatus": "PASS",
+  "finalModel": "ENSEMBLE_60_40",
+  "hashes": {
+    "evaluation-models.mjs": "c65b85f4ea348148c0e458bdc314cd8f8327fe50246d632a4f0e80d136083881",
+    "server.js": "8d8397842054710b578e20561d0869f175d376103a2c935a25bfad4132abbf0b",
+    "football.db": "156d999d69c53cda751da08d24f98bd077fc1d3b73e4fd348e839407d97a2751"
+  },
+  "finalConfig": {
+    "model": "ENSEMBLE_60_40",
+    "components": {
+      "V02": 0.6,
+      "V04": 0.4
+    },
+    "threshold": 30,
+    "calibration": {
+      "enabled": false,
+      "method": null
+    },
+    "productionChange": {
+      "allowed": false,
+      "status": "READY_FOR_FREEZE"
+    },
+    "database": {
+      "readOnly": true
+    }
+  }
+}

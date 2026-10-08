@@ -1,0 +1,19 @@
+{
+  "model": "ENSEMBLE_60_40",
+  "components": {
+    "V02": 0.6,
+    "V04": 0.4
+  },
+  "threshold": 30,
+  "calibration": {
+    "enabled": false,
+    "method": null
+  },
+  "productionChange": {
+    "allowed": false,
+    "status": "READY_FOR_FREEZE"
+  },
+  "database": {
+    "readOnly": true
+  }
+}

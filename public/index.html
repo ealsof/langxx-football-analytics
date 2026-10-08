@@ -1,0 +1,1011 @@
+<!doctype html>
+
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Football Analytics Lab</title>
+
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --surface: #ffffff;
+      --surface-soft: #f8fafc;
+      --border: #e5e9f0;
+      --text: #172033;
+      --muted: #7a8498;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+      --success: #16a34a;
+      --danger: #dc2626;
+      --shadow: 0 8px 30px rgba(15, 23, 42, 0.06);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .app {
+      min-height: 100vh;
+      display: flex;
+    }
+
+    .sidebar {
+      width: 240px;
+      min-height: 100vh;
+      background: #111827;
+      color: white;
+      padding: 24px 16px;
+      position: fixed;
+      left: 0;
+      top: 0;
+      bottom: 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 4px 10px 28px;
+    }
+
+    .brand-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      background: #2563eb;
+      display: grid;
+      place-items: center;
+      font-size: 20px;
+    }
+
+    .brand-title {
+      font-size: 14px;
+      font-weight: 750;
+      letter-spacing: -0.2px;
+    }
+
+    .brand-subtitle {
+      margin-top: 2px;
+      color: #94a3b8;
+      font-size: 11px;
+    }
+
+    .nav-label {
+      color: #64748b;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      padding: 0 10px 8px;
+      text-transform: uppercase;
+    }
+
+    .nav {
+      display: grid;
+      gap: 4px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 10px 11px;
+      border-radius: 9px;
+      color: #94a3b8;
+      font-size: 13px;
+      cursor: default;
+    }
+
+    .nav-item.active {
+      background: #1e293b;
+      color: white;
+    }
+
+    .nav-icon {
+      width: 18px;
+      text-align: center;
+      opacity: 0.9;
+    }
+
+    .sidebar-bottom {
+      position: absolute;
+      bottom: 20px;
+      left: 16px;
+      right: 16px;
+      padding: 12px;
+      border: 1px solid #263244;
+      border-radius: 10px;
+      background: #172033;
+    }
+
+    .system-label {
+      color: #64748b;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .system-status {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-top: 7px;
+      font-size: 12px;
+      color: #cbd5e1;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+    }
+
+    .main {
+      width: calc(100% - 240px);
+      margin-left: 240px;
+      padding: 34px 42px 50px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 20px;
+      margin-bottom: 30px;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-bottom: 7px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 29px;
+      line-height: 1.2;
+      letter-spacing: -0.7px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 8px;
+    }
+
+    .sync-button {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      padding: 10px 15px;
+      border-radius: 9px;
+      font-weight: 650;
+      font-size: 12px;
+      cursor: pointer;
+      box-shadow: var(--shadow);
+      transition: 0.15s ease;
+    }
+
+    .sync-button:hover {
+      border-color: #cbd5e1;
+      transform: translateY(-1px);
+    }
+
+    .sync-button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+      transform: none;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 15px;
+      margin-bottom: 30px;
+    }
+
+    .metric {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 13px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .metric-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 13px;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 650;
+    }
+
+    .metric-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 13px;
+    }
+
+    .metric-value {
+      font-size: 25px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+
+    .metric-description {
+      color: var(--muted);
+      font-size: 10px;
+      margin-top: 4px;
+    }
+
+    .online {
+      color: var(--success);
+    }
+
+    .section {
+      margin-top: 26px;
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 11px;
+    }
+
+    .section-title {
+      font-size: 15px;
+      font-weight: 750;
+      letter-spacing: -0.2px;
+    }
+
+    .section-description {
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 3px;
+    }
+
+    .content-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 13px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 720px;
+    }
+
+    th {
+      background: var(--surface-soft);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      text-align: left;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+      vertical-align: middle;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .match-name {
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .competition {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .kickoff {
+      color: #596579;
+      white-space: nowrap;
+    }
+
+    .prediction {
+      font-weight: 700;
+    }
+
+    .probabilities {
+      color: var(--muted);
+      font-size: 10px;
+      margin-top: 4px;
+      font-weight: 500;
+    }
+
+    .probability-bar {
+      display: flex;
+      height: 4px;
+      width: 105px;
+      background: #edf0f4;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 7px;
+    }
+
+    .prob-home {
+      background: #2563eb;
+    }
+
+    .prob-draw {
+      background: #94a3b8;
+    }
+
+    .prob-away {
+      background: #cbd5e1;
+    }
+
+    .empty {
+      padding: 35px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .footer {
+      margin-top: 28px;
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    @media (max-width: 1050px) {
+      .metrics {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 800px) {
+      .sidebar {
+        width: 66px;
+        padding: 20px 9px;
+      }
+
+      .brand {
+        justify-content: center;
+        padding-left: 0;
+        padding-right: 0;
+      }
+
+      .brand-copy,
+      .nav-label,
+      .nav-text,
+      .sidebar-bottom {
+        display: none;
+      }
+
+      .nav-item {
+        justify-content: center;
+      }
+
+      .main {
+        width: calc(100% - 66px);
+        margin-left: 66px;
+        padding: 25px 20px 40px;
+      }
+    }
+
+    @media (max-width: 580px) {
+      .main {
+        padding: 22px 14px 35px;
+      }
+
+      .topbar {
+        flex-direction: column;
+      }
+
+      .sync-button {
+        width: 100%;
+      }
+
+      .metrics {
+        grid-template-columns: 1fr;
+      }
+
+      h1 {
+        font-size: 24px;
+      }
+
+      .footer {
+        flex-direction: column;
+        gap: 5px;
+      }
+    }
+  </style>
+
+</head>
+
+<body>
+
+<div class="app">
+
+  <aside class="sidebar">
+
+```
+<div class="brand">
+  <div class="brand-icon">⚽</div>
+
+  <div class="brand-copy">
+    <div class="brand-title">Football Analytics</div>
+    <div class="brand-subtitle">Intelligence Platform</div>
+  </div>
+</div>
+
+<div class="nav-label">Workspace</div>
+
+<nav class="nav">
+  <div class="nav-item active">
+    <span class="nav-icon">◉</span>
+    <span class="nav-text">Overview</span>
+  </div>
+
+  <div class="nav-item">
+    <span class="nav-icon">▣</span>
+    <span class="nav-text">Matches</span>
+  </div>
+
+  <div class="nav-item">
+    <span class="nav-icon">◈</span>
+    <span class="nav-text">Predictions</span>
+  </div>
+
+  <div class="nav-item">
+    <span class="nav-icon">♟</span>
+    <span class="nav-text">Teams</span>
+  </div>
+
+  <div class="nav-item">
+    <span class="nav-icon">●</span>
+    <span class="nav-text">Players</span>
+  </div>
+
+  <div class="nav-item">
+    <span class="nav-icon">◇</span>
+    <span class="nav-text">Models</span>
+  </div>
+
+  <div class="nav-item">
+    <span class="nav-icon">✓</span>
+    <span class="nav-text">Evaluation</span>
+  </div>
+
+  <div class="nav-item">
+    <span class="nav-icon">▤</span>
+    <span class="nav-text">Data</span>
+  </div>
+</nav>
+
+<div class="sidebar-bottom">
+  <div class="system-label">System</div>
+
+  <div class="system-status">
+    <span class="status-dot"></span>
+    <span>Pipeline active</span>
+  </div>
+</div>
+```
+
+  </aside>
+
+  <main class="main">
+
+```
+<header class="topbar">
+
+  <div>
+    <div class="eyebrow">Football Analytics Lab</div>
+
+    <h1>Match intelligence, simplified.</h1>
+
+    <div class="subtitle">
+      Pantau performa model, data, dan pertandingan dalam satu dashboard.
+    </div>
+  </div>
+
+  <button class="sync-button" id="syncButton" onclick="sync()">
+    ↻ Run sync sekarang
+  </button>
+
+</header>
+
+<section class="metrics">
+
+  <div class="metric">
+    <div class="metric-head">
+      <div class="metric-label">Automation</div>
+      <div class="metric-icon">↻</div>
+    </div>
+
+    <div class="metric-value online" id="auto">
+      CHECKING
+    </div>
+
+    <div class="metric-description">
+      Background pipeline status
+    </div>
+  </div>
+
+  <div class="metric">
+    <div class="metric-head">
+      <div class="metric-label">Evaluated matches</div>
+      <div class="metric-icon">✓</div>
+    </div>
+
+    <div class="metric-value" id="n">
+      —
+    </div>
+
+    <div class="metric-description">
+      Matches included in evaluation
+    </div>
+  </div>
+
+  <div class="metric">
+    <div class="metric-head">
+      <div class="metric-label">Result accuracy</div>
+      <div class="metric-icon">%</div>
+    </div>
+
+    <div class="metric-value" id="acc">
+      —
+    </div>
+
+    <div class="metric-description">
+      1X2 prediction accuracy
+    </div>
+  </div>
+
+  <div class="metric">
+    <div class="metric-head">
+      <div class="metric-label">Goal MAE</div>
+      <div class="metric-icon">◉</div>
+    </div>
+
+    <div class="metric-value" id="mae">
+      —
+    </div>
+
+    <div class="metric-description">
+      Mean absolute error
+    </div>
+  </div>
+
+</section>
+
+<section class="section">
+
+  <div class="section-header">
+
+    <div>
+      <div class="section-title">
+        Upcoming / tracked matches
+      </div>
+
+      <div class="section-description">
+        20 pertandingan terdekat dari prediction engine.
+      </div>
+    </div>
+
+  </div>
+
+  <div class="content-card">
+
+    <div class="table-wrap">
+
+      <table>
+
+        <thead>
+          <tr>
+            <th>Match</th>
+            <th>Competition</th>
+            <th>Kickoff</th>
+            <th>Prediction</th>
+          </tr>
+        </thead>
+
+        <tbody id="rows">
+          <tr>
+            <td colspan="4" class="empty">
+              Loading data...
+            </td>
+          </tr>
+        </tbody>
+
+      </table>
+
+    </div>
+
+  </div>
+
+</section>
+
+<footer class="footer">
+  <span>Football Analytics Lab</span>
+  <span>EPL + La Liga • Prediction & Evaluation Pipeline</span>
+</footer>
+```
+
+  </main>
+
+</div>
+
+<script>
+
+  function formatKickoff(value) {
+
+    if (!value) {
+      return '—';
+    }
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+      return '—';
+    }
+
+    return new Intl.DateTimeFormat('id-ID', {
+      timeZone: 'Asia/Jakarta',
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).format(date) + ' WIB';
+  }
+
+
+  function getUpcomingPredictions(predictions) {
+
+    if (!Array.isArray(predictions)) {
+      return [];
+    }
+
+    const now = Date.now();
+
+    return predictions
+      .filter(x => {
+
+        if (!x || !x.kickoff) {
+          return false;
+        }
+
+        const kickoffTime =
+          new Date(x.kickoff).getTime();
+
+        if (!Number.isFinite(kickoffTime)) {
+          return false;
+        }
+
+        if (kickoffTime < now) {
+          return false;
+        }
+
+        if (
+          x.status &&
+          !['scheduled', 'timed'].includes(
+            String(x.status).toLowerCase()
+          )
+        ) {
+          return false;
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+
+        return (
+          new Date(a.kickoff).getTime() -
+          new Date(b.kickoff).getTime()
+        );
+
+      })
+      .slice(0, 20);
+  }
+
+
+  async function load() {
+
+    try {
+
+      const [
+        healthResponse,
+        metricsResponse,
+        predictionsResponse
+      ] = await Promise.all([
+        fetch('/api/health', {
+          cache: 'no-store'
+        }),
+        fetch('/api/metrics', {
+          cache: 'no-store'
+        }),
+        fetch('/api/predictions', {
+          cache: 'no-store'
+        })
+      ]);
+
+      if (
+        !healthResponse.ok ||
+        !metricsResponse.ok ||
+        !predictionsResponse.ok
+      ) {
+        throw new Error('API request failed');
+      }
+
+      const health =
+        await healthResponse.json();
+
+      const metrics =
+        await metricsResponse.json();
+
+      const predictions =
+        await predictionsResponse.json();
+
+
+      document.getElementById('auto').textContent =
+        String(
+          health.automation || 'UNKNOWN'
+        ).toUpperCase();
+
+
+      document.getElementById('n').textContent =
+        metrics.n ?? '—';
+
+
+      document.getElementById('acc').textContent =
+        typeof metrics.accuracy === 'number'
+          ? (metrics.accuracy * 100).toFixed(1) + '%'
+          : '—';
+
+
+      document.getElementById('mae').textContent =
+        metrics.goal_mae != null
+          ? Number(metrics.goal_mae).toFixed(2)
+          : '—';
+
+
+      const rows =
+        document.getElementById('rows');
+
+
+      const upcoming =
+        getUpcomingPredictions(predictions);
+
+
+      if (upcoming.length === 0) {
+
+        rows.innerHTML = `
+          <tr>
+            <td colspan="4" class="empty">
+              Belum ada pertandingan mendatang.
+            </td>
+          </tr>
+        `;
+
+        return;
+      }
+
+
+      rows.innerHTML = upcoming
+        .map(x => {
+
+          const homeProb =
+            Number(x.home_prob || 0) * 100;
+
+          const drawProb =
+            Number(x.draw_prob || 0) * 100;
+
+          const awayProb =
+            Number(x.away_prob || 0) * 100;
+
+
+          const prediction =
+            x.predicted_result === 'H'
+              ? x.home_team
+              : x.predicted_result === 'A'
+                ? x.away_team
+                : 'Draw';
+
+
+          const kickoff =
+            formatKickoff(x.kickoff);
+
+
+          return `
+            <tr>
+
+              <td>
+                <div class="match-name">
+                  ${x.home_team || 'Home'}
+                  <span style="font-weight:400;color:#94a3b8">
+                    vs
+                  </span>
+                  ${x.away_team || 'Away'}
+                </div>
+              </td>
+
+              <td>
+                <span class="competition">
+                  ${x.competition || 'Unknown'}
+                </span>
+              </td>
+
+              <td>
+                <span class="kickoff">
+                  ${kickoff}
+                </span>
+              </td>
+
+              <td>
+
+                <div class="prediction">
+                  ${prediction}
+                </div>
+
+                <div class="probabilities">
+                  ${homeProb.toFixed(0)}%
+                  /
+                  ${drawProb.toFixed(0)}%
+                  /
+                  ${awayProb.toFixed(0)}%
+                </div>
+
+                <div class="probability-bar">
+
+                  <div
+                    class="prob-home"
+                    style="width:${homeProb}%">
+                  </div>
+
+                  <div
+                    class="prob-draw"
+                    style="width:${drawProb}%">
+                  </div>
+
+                  <div
+                    class="prob-away"
+                    style="width:${awayProb}%">
+                  </div>
+
+                </div>
+
+              </td>
+
+            </tr>
+          `;
+
+        })
+        .join('');
+
+    }
+
+    catch (error) {
+
+      console.error(error);
+
+      document.getElementById('auto').textContent =
+        'OFFLINE';
+
+      document.getElementById('rows').innerHTML = `
+        <tr>
+          <td colspan="4" class="empty">
+            Tidak dapat mengambil data dari API.
+          </td>
+        </tr>
+      `;
+
+    }
+
+  }
+
+
+  async function sync() {
+
+    const button =
+      document.getElementById('syncButton');
+
+    button.disabled = true;
+
+    button.textContent =
+      '↻ Syncing...';
+
+
+    try {
+
+      const response =
+        await fetch('/api/admin/sync', {
+          method: 'POST'
+        });
+
+
+      if (!response.ok) {
+        throw new Error('Sync failed');
+      }
+
+
+      await load();
+
+    }
+
+    catch (error) {
+
+      console.error(error);
+
+      alert(
+        'Sync gagal. Cek server atau koneksi API.'
+      );
+
+    }
+
+    finally {
+
+      button.disabled = false;
+
+      button.textContent =
+        '↻ Run sync sekarang';
+
+    }
+
+  }
+
+
+  load();
+
+  setInterval(load, 30000);
+
+</script>
+
+</body>
+</html>
