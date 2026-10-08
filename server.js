@@ -3,93 +3,158 @@ import express from 'express';
 import cron from 'node-cron';
 import Database from 'better-sqlite3';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 const app = express();
 
-const db = new Database(
-  path.join(__dirname, 'football.db')
+// ============================================================
+// APP CONFIG
+// ============================================================
+
+const PORT = Number(process.env.PORT || 3000);
+
+const DATA_DIR = path.resolve(
+  process.env.DATA_DIR || __dirname
 );
+
+fs.mkdirSync(DATA_DIR, {
+  recursive: true
+});
+
+const DB_PATH = path.join(
+  DATA_DIR,
+  'football.db'
+);
+
+// ============================================================
+// DATABASE
+// ============================================================
+
+const db = new Database(DB_PATH);
 
 db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
 
 db.exec(`
-CREATE TABLE IF NOT EXISTS matches (
- id INTEGER PRIMARY KEY,
- home_team TEXT NOT NULL,
- away_team TEXT NOT NULL,
- competition TEXT NOT NULL,
- kickoff TEXT NOT NULL,
- status TEXT DEFAULT 'scheduled',
- home_score INTEGER,
- away_score INTEGER,
- source TEXT,
- updated_at TEXT NOT NULL
-);
+  CREATE TABLE IF NOT EXISTS matches (
+    id INTEGER PRIMARY KEY,
+    home_team TEXT NOT NULL,
+    away_team TEXT NOT NULL,
+    competition TEXT NOT NULL,
+    kickoff TEXT NOT NULL,
+    status TEXT DEFAULT 'scheduled',
+    home_score INTEGER,
+    away_score INTEGER,
+    source TEXT,
+    updated_at TEXT NOT NULL
+  );
 
-CREATE TABLE IF NOT EXISTS predictions (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- match_id INTEGER NOT NULL,
- model_version TEXT NOT NULL,
- created_at TEXT NOT NULL,
- home_prob REAL NOT NULL,
- draw_prob REAL NOT NULL,
- away_prob REAL NOT NULL,
- predicted_home_goals REAL,
- predicted_away_goals REAL,
- predicted_result TEXT NOT NULL,
- FOREIGN KEY(match_id) REFERENCES matches(id)
-);
+  CREATE TABLE IF NOT EXISTS match_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    provider_match_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
 
-CREATE TABLE IF NOT EXISTS evaluations (
- id INTEGER PRIMARY KEY AUTOINCREMENT,
- prediction_id INTEGER NOT NULL,
- evaluated_at TEXT NOT NULL,
- actual_result TEXT,
- exact_score_hit INTEGER DEFAULT 0,
- result_hit INTEGER DEFAULT 0,
- home_goal_error REAL,
- away_goal_error REAL,
- FOREIGN KEY(prediction_id) REFERENCES predictions(id)
-);
+    UNIQUE(provider, provider_match_id),
 
-CREATE TABLE IF NOT EXISTS model_versions (
- version TEXT PRIMARY KEY,
- status TEXT NOT NULL,
- created_at TEXT NOT NULL,
- accuracy REAL,
- notes TEXT
-);
+    FOREIGN KEY(match_id)
+      REFERENCES matches(id)
+      ON DELETE CASCADE
+  );
 
-INSERT OR IGNORE INTO model_versions(
-  version,
-  status,
-  created_at,
-  notes
-)
-VALUES(
-  'v0.1',
-  'legacy',
-  datetime('now'),
-  'Original baseline architecture'
-);
+  CREATE INDEX IF NOT EXISTS idx_match_sources_lookup
+  ON match_sources(
+    provider,
+    provider_match_id
+  );
 
-INSERT OR IGNORE INTO model_versions(
-  version,
-  status,
-  created_at,
-  notes
-)
-VALUES(
-  'ensemble_60_40',
-  'production',
-  datetime('now'),
-  'Production model: V0.2 60% + V0.4 40%, minimum 30 prior same-competition matches, calibration OFF'
-);
+  CREATE INDEX IF NOT EXISTS idx_matches_kickoff
+  ON matches(kickoff);
+
+  CREATE INDEX IF NOT EXISTS idx_matches_competition
+  ON matches(competition);
+
+  CREATE INDEX IF NOT EXISTS idx_predictions_match
+  ON predictions(match_id);
+
+  CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id INTEGER NOT NULL,
+    model_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    home_prob REAL NOT NULL,
+    draw_prob REAL NOT NULL,
+    away_prob REAL NOT NULL,
+    predicted_home_goals REAL,
+    predicted_away_goals REAL,
+    predicted_result TEXT NOT NULL,
+
+    FOREIGN KEY(match_id)
+      REFERENCES matches(id)
+      ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prediction_id INTEGER NOT NULL,
+    evaluated_at TEXT NOT NULL,
+    actual_result TEXT,
+    exact_score_hit INTEGER DEFAULT 0,
+    result_hit INTEGER DEFAULT 0,
+    home_goal_error REAL,
+    away_goal_error REAL,
+
+    FOREIGN KEY(prediction_id)
+      REFERENCES predictions(id)
+      ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS model_versions (
+    version TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    accuracy REAL,
+    notes TEXT
+  );
+
+  INSERT OR IGNORE INTO model_versions(
+    version,
+    status,
+    created_at,
+    notes
+  )
+  VALUES(
+    'v0.1',
+    'legacy',
+    datetime('now'),
+    'Original baseline architecture'
+  );
+
+  INSERT OR IGNORE INTO model_versions(
+    version,
+    status,
+    created_at,
+    notes
+  )
+  VALUES(
+    'ensemble_60_40',
+    'production',
+    datetime('now'),
+    'Production model: V0.2 60% + V0.4 40%, minimum 30 prior same-competition matches, calibration OFF'
+  );
 `);
 
+// ============================================================
+// EXPRESS
+// ============================================================
+
 app.use(express.json());
+
 app.use(
   express.static(
     path.join(__dirname, 'public')
@@ -115,8 +180,9 @@ const V02_WEIGHT =
 const V04_WEIGHT =
   0.40;
 
-// V0.1 fallback constants.
-// Hanya digunakan jika history < 30 pertandingan.
+// Fallback hanya digunakan
+// jika history belum mencapai 30 pertandingan.
+
 const FALLBACK_HOME_PROB =
   0.45;
 
@@ -140,8 +206,14 @@ const now = () =>
   new Date().toISOString();
 
 function result(home, away) {
-  if (home > away) return 'H';
-  if (home < away) return 'A';
+  if (home > away) {
+    return 'H';
+  }
+
+  if (home < away) {
+    return 'A';
+  }
+
   return 'D';
 }
 
@@ -152,11 +224,7 @@ function factorial(n) {
 
   let value = 1;
 
-  for (
-    let i = 2;
-    i <= n;
-    i++
-  ) {
+  for (let i = 2; i <= n; i++) {
     value *= i;
   }
 
@@ -171,11 +239,7 @@ function poisson(lambda, k) {
   );
 }
 
-function clip(
-  value,
-  min,
-  max
-) {
+function clip(value, min, max) {
   return Math.max(
     min,
     Math.min(max, value)
@@ -235,14 +299,8 @@ function poissonPrediction(
       a++
     ) {
       const probability =
-        poisson(
-          homeGoals,
-          h
-        ) *
-        poisson(
-          awayGoals,
-          a
-        );
+        poisson(homeGoals, h) *
+        poisson(awayGoals, a);
 
       if (h > a) {
         homeWin += probability;
@@ -312,7 +370,6 @@ function poissonPrediction(
 // ============================================================
 // V0.2
 // ALL-HISTORY SAME-COMPETITION
-// TEAM GF/GA + LEAGUE HOME/AWAY SCORING
 // ============================================================
 
 function predictV02(
@@ -345,18 +402,12 @@ function predictV02(
   let awayGoalsFor = 0;
   let awayGoalsAgainst = 0;
 
-  for (
-    const match of finished
-  ) {
+  for (const match of finished) {
     const homeScore =
-      Number(
-        match.home_score
-      );
+      Number(match.home_score);
 
     const awayScore =
-      Number(
-        match.away_score
-      );
+      Number(match.away_score);
 
     leagueHomeGoals +=
       homeScore;
@@ -481,6 +532,7 @@ function predictV02(
     awayAttack *
     homeDefense;
 
+  // Home advantage 5%
   homeGoals *= 1.05;
 
   homeGoals =
@@ -528,15 +580,11 @@ function eloExpected(
 function eloMarginMultiplier(
   goalMargin
 ) {
-  if (
-    goalMargin <= 1
-  ) {
+  if (goalMargin <= 1) {
     return 1;
   }
 
-  if (
-    goalMargin === 2
-  ) {
+  if (goalMargin === 2) {
     return 1.25;
   }
 
@@ -556,12 +604,8 @@ function predictV04(
       )
       .sort(
         (a, b) =>
-          new Date(
-            a.kickoff
-          ).getTime() -
-          new Date(
-            b.kickoff
-          ).getTime()
+          new Date(a.kickoff).getTime() -
+          new Date(b.kickoff).getTime()
       );
 
   if (
@@ -575,18 +619,14 @@ function predictV04(
     new Map();
 
   function getRating(team) {
-    if (
-      !ratings.has(team)
-    ) {
+    if (!ratings.has(team)) {
       ratings.set(
         team,
         1500
       );
     }
 
-    return ratings.get(
-      team
-    );
+    return ratings.get(team);
   }
 
   function setRating(
@@ -599,9 +639,7 @@ function predictV04(
     );
   }
 
-  for (
-    const match of finished
-  ) {
+  for (const match of finished) {
     const home =
       match.home_team;
 
@@ -609,14 +647,10 @@ function predictV04(
       match.away_team;
 
     const homeScore =
-      Number(
-        match.home_score
-      );
+      Number(match.home_score);
 
     const awayScore =
-      Number(
-        match.away_score
-      );
+      Number(match.away_score);
 
     const homeRating =
       getRating(home);
@@ -631,11 +665,9 @@ function predictV04(
       );
 
     const actualHome =
-      homeScore >
-      awayScore
+      homeScore > awayScore
         ? 1
-        : homeScore ===
-          awayScore
+        : homeScore === awayScore
           ? 0.5
           : 0;
 
@@ -666,10 +698,8 @@ function predictV04(
       awayRating +
       k *
         (
-          (1 -
-            actualHome) -
-          (1 -
-            expectedHome)
+          (1 - actualHome) -
+          (1 - expectedHome)
         );
 
     setRating(
@@ -701,8 +731,7 @@ function predictV04(
   const homeFactor =
     clip(
       1 +
-        difference /
-          1000,
+        difference / 1000,
       0.65,
       1.35
     );
@@ -710,8 +739,7 @@ function predictV04(
   const awayFactor =
     clip(
       1 -
-        difference /
-          1200,
+        difference / 1200,
       0.65,
       1.35
     );
@@ -719,18 +747,12 @@ function predictV04(
   let leagueHomeGoals = 0;
   let leagueAwayGoals = 0;
 
-  for (
-    const match of finished
-  ) {
+  for (const match of finished) {
     leagueHomeGoals +=
-      Number(
-        match.home_score
-      );
+      Number(match.home_score);
 
     leagueAwayGoals +=
-      Number(
-        match.away_score
-      );
+      Number(match.away_score);
   }
 
   const homeAverage =
@@ -796,42 +818,27 @@ function predictEnsemble(
       priorMatches
     );
 
-  if (
-    !v02 ||
-    !v04
-  ) {
+  if (!v02 || !v04) {
     return null;
   }
 
   const homeProb =
-    (
-      V02_WEIGHT *
-        v02.homeProb
-    ) +
-    (
-      V04_WEIGHT *
-        v04.homeProb
-    );
+    V02_WEIGHT *
+      v02.homeProb +
+    V04_WEIGHT *
+      v04.homeProb;
 
   const drawProb =
-    (
-      V02_WEIGHT *
-        v02.drawProb
-    ) +
-    (
-      V04_WEIGHT *
-        v04.drawProb
-    );
+    V02_WEIGHT *
+      v02.drawProb +
+    V04_WEIGHT *
+      v04.drawProb;
 
   const awayProb =
-    (
-      V02_WEIGHT *
-        v02.awayProb
-    ) +
-    (
-      V04_WEIGHT *
-        v04.awayProb
-    );
+    V02_WEIGHT *
+      v02.awayProb +
+    V04_WEIGHT *
+      v04.awayProb;
 
   const probabilities =
     normalizeProbabilities(
@@ -852,24 +859,16 @@ function predictEnsemble(
         : 'A';
 
   const predictedHomeGoals =
-    (
-      V02_WEIGHT *
-        v02.predictedHomeGoals
-    ) +
-    (
-      V04_WEIGHT *
-        v04.predictedHomeGoals
-    );
+    V02_WEIGHT *
+      v02.predictedHomeGoals +
+    V04_WEIGHT *
+      v04.predictedHomeGoals;
 
   const predictedAwayGoals =
-    (
-      V02_WEIGHT *
-        v02.predictedAwayGoals
-    ) +
-    (
-      V04_WEIGHT *
-        v04.predictedAwayGoals
-    );
+    V02_WEIGHT *
+      v02.predictedAwayGoals +
+    V04_WEIGHT *
+      v04.predictedAwayGoals;
 
   return {
     homeProb:
@@ -882,7 +881,6 @@ function predictEnsemble(
       probabilities.away,
 
     predictedHomeGoals,
-
     predictedAwayGoals,
 
     predictedResult,
@@ -931,11 +929,8 @@ function fallbackPrediction() {
       FALLBACK_MODEL_VERSION,
 
     components: {
-      v02:
-        0,
-
-      v04:
-        0
+      v02: 0,
+      v04: 0
     },
 
     historyMatches:
@@ -947,9 +942,7 @@ function fallbackPrediction() {
 // PRIOR MATCHES
 // ============================================================
 
-function getPriorMatches(
-  target
-) {
+function getPriorMatches(target) {
   return db.prepare(`
     SELECT
       id,
@@ -988,9 +981,7 @@ function createPredictions() {
           'timed'
         )
       ORDER BY kickoff ASC
-    `).all(
-      now()
-    );
+    `).all(now());
 
   const insert =
     db.prepare(`
@@ -1005,17 +996,7 @@ function createPredictions() {
         predicted_away_goals,
         predicted_result
       )
-      VALUES(
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?
-      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
   let ensembleCount = 0;
@@ -1024,14 +1005,10 @@ function createPredictions() {
 
   const transaction =
     db.transaction(() => {
-
-      for (
-        const match of matches
-      ) {
+      for (const match of matches) {
         const existing =
           db.prepare(`
-            SELECT
-              1
+            SELECT 1
             FROM predictions
             WHERE match_id = ?
               AND model_version = ?
@@ -1047,9 +1024,7 @@ function createPredictions() {
         }
 
         const priorMatches =
-          getPriorMatches(
-            match
-          );
+          getPriorMatches(match);
 
         let prediction =
           predictEnsemble(
@@ -1153,47 +1128,31 @@ function evaluateFinished() {
         home_goal_error,
         away_goal_error
       )
-      VALUES(
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?
-      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
 
   const transaction =
     db.transaction(() => {
-
-      for (
-        const row of rows
-      ) {
+      for (const row of rows) {
         const actualResult =
           result(
             row.home_score,
             row.away_score
           );
 
-        const predictedResult =
-          row.predicted_result;
-
         const exactScoreHit =
           Math.round(
             row.predicted_home_goals
-          ) ===
-            row.home_score &&
+          ) === row.home_score &&
           Math.round(
             row.predicted_away_goals
-          ) ===
-            row.away_score
+          ) === row.away_score
             ? 1
             : 0;
 
         const resultHit =
           actualResult ===
-          predictedResult
+          row.predicted_result
             ? 1
             : 0;
 
@@ -1282,42 +1241,25 @@ function mockSync() {
         source,
         updated_at
       )
-      VALUES(
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?
-      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id)
       DO UPDATE SET
-        home_team =
-          excluded.home_team,
-        away_team =
-          excluded.away_team,
-        competition =
-          excluded.competition,
-        kickoff =
-          excluded.kickoff,
-        status =
-          excluded.status,
-        updated_at =
-          excluded.updated_at
+        home_team = excluded.home_team,
+        away_team = excluded.away_team,
+        competition = excluded.competition,
+        kickoff = excluded.kickoff,
+        status = excluded.status,
+        updated_at = excluded.updated_at
     `);
 
   const transaction =
     db.transaction(() => {
-
-      sample.forEach(
-        row =>
-          up.run(
-            ...row,
-            'mock',
-            now()
-          )
+      sample.forEach(row =>
+        up.run(
+          ...row,
+          'mock',
+          now()
+        )
       );
     });
 
@@ -1339,7 +1281,7 @@ function mockSync() {
 }
 
 // ============================================================
-// REAL SYNC
+// REAL SYNC — FOOTBALL-DATA.ORG
 // ============================================================
 
 async function sync() {
@@ -1393,17 +1335,7 @@ async function sync() {
         source,
         updated_at
       )
-      VALUES(
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?,
-        ?
-      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
   const insertSource =
@@ -1415,13 +1347,7 @@ async function sync() {
         created_at,
         updated_at
       )
-      VALUES(
-        ?,
-        ?,
-        ?,
-        ?,
-        ?
-      )
+      VALUES (?, ?, ?, ?, ?)
     `);
 
   let totalReceived = 0;
@@ -1429,8 +1355,7 @@ async function sync() {
   let totalExisting = 0;
 
   for (
-    const competition of
-    competitions
+    const competition of competitions
   ) {
     const url =
       `https://api.football-data.org/v4/competitions/${competition.code}/matches`;
@@ -1459,9 +1384,7 @@ async function sync() {
       await response.json();
 
     const matches =
-      Array.isArray(
-        json.matches
-      )
+      Array.isArray(json.matches)
         ? json.matches
         : [];
 
@@ -1469,13 +1392,10 @@ async function sync() {
       matches.length;
 
     for (
-      const match of
-      matches
+      const match of matches
     ) {
       const providerMatchId =
-        String(
-          match.id
-        );
+        String(match.id);
 
       const existing =
         findSource.get(
@@ -1524,7 +1444,6 @@ async function sync() {
         );
 
         totalExisting++;
-
         continue;
       }
 
@@ -1541,8 +1460,7 @@ async function sync() {
 
       const insertTransaction =
         db.transaction(() => {
-
-          const result =
+          const insertResult =
             insertMatch.run(
               homeTeam,
               awayTeam,
@@ -1557,7 +1475,7 @@ async function sync() {
 
           const internalMatchId =
             Number(
-              result.lastInsertRowid
+              insertResult.lastInsertRowid
             );
 
           insertSource.run(
@@ -1585,11 +1503,10 @@ async function sync() {
     mode:
       'football-data.org',
 
-    competitions:
-      [
-        'PL',
-        'PD'
-      ],
+    competitions: [
+      'PL',
+      'PD'
+    ],
 
     fixtures_received:
       totalReceived,
@@ -1601,21 +1518,19 @@ async function sync() {
       totalExisting,
 
     predictions,
-
     evaluations
   };
 }
 
 // ============================================================
-// API
+// API — HEALTH
 // ============================================================
 
 app.get(
   '/api/health',
   (req, res) => {
     res.json({
-      ok:
-        true,
+      ok: true,
 
       time:
         now(),
@@ -1645,180 +1560,205 @@ app.get(
       },
 
       calibration:
-        false
+        false,
+
+      database:
+        'sqlite',
+
+      dataDirectoryConfigured:
+        Boolean(
+          process.env.DATA_DIR
+        )
     });
   }
 );
 
-// ------------------------------------------------------------
-// MATCHES
-// ------------------------------------------------------------
+// ============================================================
+// API — MATCHES
+// ============================================================
 
 app.get(
   '/api/matches',
   (req, res) => {
-    const rows =
-      db.prepare(`
-        SELECT *
-        FROM matches
-        ORDER BY kickoff ASC
-        LIMIT 100
-      `).all();
+    try {
+      const rows =
+        db.prepare(`
+          SELECT *
+          FROM matches
+          ORDER BY kickoff ASC
+          LIMIT 100
+        `).all();
 
-    res.json(
-      rows
-    );
+      res.json(rows);
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error.message
+      });
+    }
   }
 );
 
-// ------------------------------------------------------------
-// PREDICTIONS
-//
-// Menampilkan prediksi TERBARU untuk setiap pertandingan.
-// Prediksi v0.1 lama tidak dihapus dari database.
-// ------------------------------------------------------------
+// ============================================================
+// API — PREDICTIONS
+// ============================================================
 
 app.get(
   '/api/predictions',
   (req, res) => {
-    const rows =
-      db.prepare(`
-        SELECT
-          p.*,
-          m.home_team,
-          m.away_team,
-          m.competition,
-          m.kickoff,
-          m.status,
-          m.home_score,
-          m.away_score
-        FROM predictions p
-        JOIN matches m
-          ON m.id = p.match_id
-        WHERE p.id IN (
-          SELECT MAX(p2.id)
-          FROM predictions p2
-          GROUP BY p2.match_id
-        )
-        AND m.kickoff >= datetime('now')
-        AND m.status IN ('scheduled', 'timed')
-        ORDER BY m.kickoff ASC
-        LIMIT 100
-      `).all();
+    try {
+      const rows =
+        db.prepare(`
+          SELECT
+            p.*,
+            m.home_team,
+            m.away_team,
+            m.competition,
+            m.kickoff,
+            m.status,
+            m.home_score,
+            m.away_score
+          FROM predictions p
+          JOIN matches m
+            ON m.id = p.match_id
+          WHERE p.id IN (
+            SELECT MAX(p2.id)
+            FROM predictions p2
+            GROUP BY p2.match_id
+          )
+          AND m.kickoff >= datetime('now')
+          AND m.status IN (
+            'scheduled',
+            'timed'
+          )
+          ORDER BY m.kickoff ASC
+          LIMIT 100
+        `).all();
 
-    res.json(
-      rows
-    );
+      res.json(rows);
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error.message
+      });
+    }
   }
 );
 
-// ------------------------------------------------------------
-// EVALUATIONS
-// ------------------------------------------------------------
+// ============================================================
+// API — EVALUATIONS
+// ============================================================
 
 app.get(
   '/api/evaluations',
   (req, res) => {
+    try {
+      const rows =
+        db.prepare(`
+          SELECT
+            e.*,
+            p.model_version,
+            m.home_team,
+            m.away_team,
+            m.home_score,
+            m.away_score
+          FROM evaluations e
+          JOIN predictions p
+            ON p.id = e.prediction_id
+          JOIN matches m
+            ON m.id = p.match_id
+          ORDER BY
+            e.evaluated_at DESC
+          LIMIT 100
+        `).all();
 
-    const rows =
-      db.prepare(`
-        SELECT
-          e.*,
-          p.model_version,
-          m.home_team,
-          m.away_team,
-          m.home_score,
-          m.away_score
-        FROM evaluations e
-        JOIN predictions p
-          ON p.id =
-             e.prediction_id
-        JOIN matches m
-          ON m.id =
-             p.match_id
-        ORDER BY
-          e.evaluated_at DESC
-        LIMIT 100
-      `).all();
-
-    res.json(
-      rows
-    );
+      res.json(rows);
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error.message
+      });
+    }
   }
 );
 
-// ------------------------------------------------------------
-// METRICS
-//
-// Hanya metrics production model.
-// ------------------------------------------------------------
+// ============================================================
+// API — METRICS
+// ============================================================
 
 app.get(
   '/api/metrics',
   (req, res) => {
+    try {
+      const production =
+        db.prepare(`
+          SELECT
+            COUNT(*) AS n,
 
-    const production =
-      db.prepare(`
-        SELECT
-          COUNT(*) AS n,
+            COALESCE(
+              AVG(result_hit),
+              0
+            ) AS accuracy,
 
-          COALESCE(
-            AVG(result_hit),
-            0
-          ) AS accuracy,
+            COALESCE(
+              AVG(exact_score_hit),
+              0
+            ) AS exact_score,
 
-          COALESCE(
-            AVG(exact_score_hit),
-            0
-          ) AS exact_score,
+            COALESCE(
+              AVG(
+                (
+                  home_goal_error +
+                  away_goal_error
+                ) / 2.0
+              ),
+              0
+            ) AS goal_mae
 
-          COALESCE(
-            AVG(
-              (
-                home_goal_error +
-                away_goal_error
-              ) / 2.0
-            ),
-            0
-          ) AS goal_mae
+          FROM evaluations e
 
-        FROM evaluations e
-        JOIN predictions p
-          ON p.id =
-             e.prediction_id
+          JOIN predictions p
+            ON p.id =
+               e.prediction_id
 
-        WHERE p.model_version IN (
-          'ensemble_60_40',
-          'v0.1-fallback'
-        )
-      `).get();
+          WHERE p.model_version IN (
+            'ensemble_60_40',
+            'v0.1-fallback'
+          )
+        `).get();
 
-    res.json({
-      model:
-        MODEL_VERSION,
+      res.json({
+        model:
+          MODEL_VERSION,
 
-      threshold:
-        HISTORY_THRESHOLD,
+        threshold:
+          HISTORY_THRESHOLD,
 
-      weights: {
-        v02:
-          V02_WEIGHT,
+        weights: {
+          v02:
+            V02_WEIGHT,
 
-        v04:
-          V04_WEIGHT
-      },
+          v04:
+            V04_WEIGHT
+        },
 
-      calibration:
-        false,
+        calibration:
+          false,
 
-      ...production
-    });
+        ...production
+      });
+    } catch (error) {
+      res.status(500).json({
+        error:
+          error.message
+      });
+    }
   }
 );
 
-// ------------------------------------------------------------
-// MODEL INFO
-// ------------------------------------------------------------
+// ============================================================
+// API — MODEL INFO
+// ============================================================
 
 app.get(
   '/api/model',
@@ -1853,14 +1793,14 @@ app.get(
         true,
 
       database:
-        'existing football.db'
+        'SQLite'
     });
   }
 );
 
-// ------------------------------------------------------------
-// SYNC
-// ------------------------------------------------------------
+// ============================================================
+// API — MANUAL SYNC
+// ============================================================
 
 app.post(
   '/api/admin/sync',
@@ -1869,9 +1809,7 @@ app.post(
       const data =
         await sync();
 
-      res.json(
-        data
-      );
+      res.json(data);
     } catch (error) {
       res.status(500).json({
         error:
@@ -1888,6 +1826,7 @@ app.post(
 cron.schedule(
   process.env.SYNC_CRON ||
     '*/15 * * * *',
+
   async () => {
     try {
       const data =
@@ -1911,38 +1850,33 @@ cron.schedule(
 // ============================================================
 
 sync()
-  .then(
-    data => {
-      console.log(
-        '[startup] sync completed',
-        data
-      );
-    }
-  )
-  .catch(
-    error => {
-      console.error(
-        '[startup]',
-        error.message
-      );
-    }
-  );
+  .then(data => {
+    console.log(
+      '[startup] sync completed',
+      data
+    );
+  })
+  .catch(error => {
+    console.error(
+      '[startup]',
+      error.message
+    );
+  });
 
 // ============================================================
 // SERVER
 // ============================================================
 
-const port =
-  Number(
-    process.env.PORT ||
-      3000
-  );
-
 app.listen(
-  port,
+  PORT,
+  '0.0.0.0',
   () => {
     console.log(
-      `Football Analytics Lab: http://localhost:${port}`
+      `Football Analytics Lab running on port ${PORT}`
+    );
+
+    console.log(
+      `[database] ${DB_PATH}`
     );
 
     console.log(
