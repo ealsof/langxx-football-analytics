@@ -1,5 +1,5 @@
-
 import 'dotenv/config';
+
 import express from 'express';
 import cron from 'node-cron';
 import Database from 'better-sqlite3';
@@ -19,6 +19,7 @@ const DB_PATH = path.join(DATA_DIR, 'football.db');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const db = new Database(DB_PATH);
+
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
@@ -27,6 +28,7 @@ const now = () => new Date().toISOString();
 
 const MODEL_VERSION = 'ensemble_60_40';
 const FALLBACK_MODEL_VERSION = 'v0.1-fallback';
+
 const HISTORY_THRESHOLD = 30;
 const V02_WEIGHT = 0.60;
 const V04_WEIGHT = 0.40;
@@ -34,13 +36,14 @@ const V04_WEIGHT = 0.40;
 const FALLBACK_HOME_PROB = 0.45;
 const FALLBACK_DRAW_PROB = 0.27;
 const FALLBACK_AWAY_PROB = 0.28;
+
 const FALLBACK_HOME_GOALS = 1.55;
 const FALLBACK_AWAY_GOALS = 1.05;
 
+const FINAL_STATUSES = new Set(['FINISHED', 'AWARDED']);
+
 // ============================================================
 // DATABASE SCHEMA
-// All tables are created before any indexes reference them.
-// Existing database files are retained.
 // ============================================================
 
 db.exec(`
@@ -72,6 +75,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     match_id INTEGER NOT NULL,
     model_version TEXT NOT NULL,
+    prediction_type TEXT NOT NULL DEFAULT 'live',
     created_at TEXT NOT NULL,
     home_prob REAL NOT NULL,
     draw_prob REAL NOT NULL,
@@ -103,10 +107,14 @@ db.exec(`
   );
 `);
 
-// Ensure required columns exist if an older database schema is present.
+// ============================================================
+// DATABASE MIGRATIONS
+// ============================================================
+
 function ensureColumn(table, column, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!columns.some(item => item.name === column)) {
+
+  if (!columns.some((item) => item.name === column)) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
@@ -119,12 +127,15 @@ const migrations = {
     source: 'TEXT',
     updated_at: "TEXT NOT NULL DEFAULT ''"
   },
+
   match_sources: {
     created_at: "TEXT NOT NULL DEFAULT ''",
     updated_at: "TEXT NOT NULL DEFAULT ''"
   },
+
   predictions: {
     model_version: "TEXT NOT NULL DEFAULT 'v0.1'",
+    prediction_type: "TEXT NOT NULL DEFAULT 'live'",
     created_at: "TEXT NOT NULL DEFAULT ''",
     home_prob: 'REAL NOT NULL DEFAULT 0.333333',
     draw_prob: 'REAL NOT NULL DEFAULT 0.333333',
@@ -133,6 +144,7 @@ const migrations = {
     predicted_away_goals: 'REAL',
     predicted_result: "TEXT NOT NULL DEFAULT 'H'"
   },
+
   evaluations: {
     evaluated_at: "TEXT NOT NULL DEFAULT ''",
     actual_result: 'TEXT',
@@ -149,7 +161,6 @@ for (const [table, columns] of Object.entries(migrations)) {
   }
 }
 
-// IMPORTANT: indexes are created only after all relevant tables exist.
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_matches_kickoff
     ON matches(kickoff);
@@ -162,6 +173,9 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_predictions_version
     ON predictions(model_version);
+
+  CREATE INDEX IF NOT EXISTS idx_predictions_type
+    ON predictions(prediction_type);
 
   CREATE INDEX IF NOT EXISTS idx_match_sources_lookup
     ON match_sources(provider, provider_match_id);
@@ -207,7 +221,11 @@ function result(home, away) {
 
 function factorial(n) {
   let value = 1;
-  for (let i = 2; i <= n; i++) value *= i;
+
+  for (let i = 2; i <= n; i++) {
+    value *= i;
+  }
+
   return value;
 }
 
@@ -223,13 +241,52 @@ function normalizeProbabilities(home, draw, away) {
   const total = home + draw + away;
 
   if (!Number.isFinite(total) || total <= 0) {
-    return { home: 1 / 3, draw: 1 / 3, away: 1 / 3 };
+    return {
+      home: 1 / 3,
+      draw: 1 / 3,
+      away: 1 / 3
+    };
   }
 
   return {
     home: home / total,
     draw: draw / total,
     away: away / total
+  };
+}
+
+function isNumericScore(value) {
+  return (
+    value !== null &&
+    value !== undefined &&
+    value !== '' &&
+    Number.isFinite(Number(value))
+  );
+}
+
+function normalizeProviderMatch(match) {
+  const rawStatus = String(match.status || 'SCHEDULED').toUpperCase();
+
+  // Hanya hasil final yang disimpan sebagai skor pertandingan.
+  // Skor 0 dari API pada laga yang belum dimainkan bukan hasil 0-0.
+  const isFinal = FINAL_STATUSES.has(rawStatus);
+
+  const rawHomeScore = match.score?.fullTime?.home;
+  const rawAwayScore = match.score?.fullTime?.away;
+
+  const hasFinalScore =
+    isFinal &&
+    isNumericScore(rawHomeScore) &&
+    isNumericScore(rawAwayScore);
+
+  return {
+    providerMatchId: String(match.id),
+    homeTeam: match.homeTeam?.name || 'Unknown Home Team',
+    awayTeam: match.awayTeam?.name || 'Unknown Away Team',
+    kickoff: match.utcDate,
+    status: isFinal ? 'finished' : rawStatus.toLowerCase(),
+    homeScore: hasFinalScore ? Number(rawHomeScore) : null,
+    awayScore: hasFinalScore ? Number(rawAwayScore) : null
   };
 }
 
@@ -274,17 +331,22 @@ function poissonPrediction(homeGoals, awayGoals) {
 
 function predictV02(target, priorMatches) {
   const finished = priorMatches.filter(
-    match => match.home_score !== null && match.away_score !== null
+    (match) =>
+      match.home_score !== null &&
+      match.away_score !== null
   );
 
   if (finished.length < HISTORY_THRESHOLD) return null;
 
   let leagueHomeGoals = 0;
   let leagueAwayGoals = 0;
+
   let homeGames = 0;
   let awayGames = 0;
+
   let homeGoalsFor = 0;
   let homeGoalsAgainst = 0;
+
   let awayGoalsFor = 0;
   let awayGoalsAgainst = 0;
 
@@ -325,7 +387,9 @@ function predictV02(target, priorMatches) {
   const leagueHomeAverage = leagueHomeGoals / finished.length;
   const leagueAwayAverage = leagueAwayGoals / finished.length;
 
-  if (leagueHomeAverage <= 0 || leagueAwayAverage <= 0) return null;
+  if (leagueHomeAverage <= 0 || leagueAwayAverage <= 0) {
+    return null;
+  }
 
   const homeAttack =
     homeGoalsFor / Math.max(leagueHomeAverage * homeGames, 0.1);
@@ -370,9 +434,15 @@ function eloMarginMultiplier(goalMargin) {
 
 function predictV04(target, priorMatches) {
   const finished = priorMatches
-    .filter(match => match.home_score !== null && match.away_score !== null)
+    .filter(
+      (match) =>
+        match.home_score !== null &&
+        match.away_score !== null
+    )
     .sort(
-      (a, b) => new Date(a.kickoff).getTime() - new Date(b.kickoff).getTime()
+      (a, b) =>
+        new Date(a.kickoff).getTime() -
+        new Date(b.kickoff).getTime()
     );
 
   if (finished.length < HISTORY_THRESHOLD) return null;
@@ -391,22 +461,44 @@ function predictV04(target, priorMatches) {
   for (const match of finished) {
     const home = match.home_team;
     const away = match.away_team;
+
     const homeScore = Number(match.home_score);
     const awayScore = Number(match.away_score);
 
     const homeRating = getRating(home);
     const awayRating = getRating(away);
+
     const expectedHome = eloExpected(homeRating + 60, awayRating);
-    const actualHome = homeScore > awayScore ? 1 : homeScore === awayScore ? 0.5 : 0;
-    const multiplier = eloMarginMultiplier(Math.abs(homeScore - awayScore));
+
+    const actualHome =
+      homeScore > awayScore
+        ? 1
+        : homeScore === awayScore
+          ? 0.5
+          : 0;
+
+    const multiplier = eloMarginMultiplier(
+      Math.abs(homeScore - awayScore)
+    );
+
     const k = 25 * multiplier;
 
-    setRating(home, homeRating + k * (actualHome - expectedHome));
-    setRating(away, awayRating + k * ((1 - actualHome) - (1 - expectedHome)));
+    setRating(
+      home,
+      homeRating + k * (actualHome - expectedHome)
+    );
+
+    setRating(
+      away,
+      awayRating +
+        k * ((1 - actualHome) - (1 - expectedHome))
+    );
   }
 
   const difference =
-    getRating(target.home_team) + 60 - getRating(target.away_team);
+    getRating(target.home_team) +
+    60 -
+    getRating(target.away_team);
 
   const homeFactor = clip(1 + difference / 1000, 0.65, 1.35);
   const awayFactor = clip(1 - difference / 1200, 0.65, 1.35);
@@ -458,15 +550,21 @@ function predictEnsemble(target, priorMatches) {
     homeProb: probabilities.home,
     drawProb: probabilities.draw,
     awayProb: probabilities.away,
+
     predictedHomeGoals:
       V02_WEIGHT * v02.predictedHomeGoals +
       V04_WEIGHT * v04.predictedHomeGoals,
+
     predictedAwayGoals:
       V02_WEIGHT * v02.predictedAwayGoals +
       V04_WEIGHT * v04.predictedAwayGoals,
+
     predictedResult,
     modelVersion: MODEL_VERSION,
-    components: { v02: V02_WEIGHT, v04: V04_WEIGHT },
+    components: {
+      v02: V02_WEIGHT,
+      v04: V04_WEIGHT
+    },
     historyMatches: priorMatches.length
   };
 }
@@ -480,44 +578,235 @@ function fallbackPrediction() {
     predictedAwayGoals: FALLBACK_AWAY_GOALS,
     predictedResult: 'H',
     modelVersion: FALLBACK_MODEL_VERSION,
-    components: { v02: 0, v04: 0 },
+    components: {
+      v02: 0,
+      v04: 0
+    },
     historyMatches: 0
   };
 }
 
 function getPriorMatches(target) {
   return db.prepare(`
-    SELECT id, home_team, away_team, competition, kickoff, status,
-           home_score, away_score
+    SELECT
+      id,
+      home_team,
+      away_team,
+      competition,
+      kickoff,
+      status,
+      home_score,
+      away_score
     FROM matches
     WHERE LOWER(status) = 'finished'
       AND home_score IS NOT NULL
       AND away_score IS NOT NULL
       AND competition = ?
-      AND kickoff < ?
+      AND julianday(kickoff) < julianday(?)
     ORDER BY kickoff ASC
   `).all(target.competition, target.kickoff);
 }
 
 // ============================================================
-// CREATE PREDICTIONS
+// PREDICTION INSERT / UPDATE HELPERS
+// ============================================================
+
+function savePrediction(match, prediction, predictionType) {
+  const existing = db.prepare(`
+    SELECT id
+    FROM predictions
+    WHERE match_id = ?
+      AND model_version = ?
+      AND prediction_type = ?
+    LIMIT 1
+  `).get(match.id, prediction.modelVersion, predictionType);
+
+  if (existing) return false;
+
+  db.prepare(`
+    INSERT INTO predictions (
+      match_id,
+      model_version,
+      prediction_type,
+      created_at,
+      home_prob,
+      draw_prob,
+      away_prob,
+      predicted_home_goals,
+      predicted_away_goals,
+      predicted_result
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    match.id,
+    prediction.modelVersion,
+    predictionType,
+    now(),
+    prediction.homeProb,
+    prediction.drawProb,
+    prediction.awayProb,
+    prediction.predictedHomeGoals,
+    prediction.predictedAwayGoals,
+    prediction.predictedResult
+  );
+
+  return true;
+}
+
+// ============================================================
+// LIVE PREDICTIONS
 // ============================================================
 
 function createPredictions() {
   const matches = db.prepare(`
     SELECT *
     FROM matches
-    WHERE kickoff > ?
+    WHERE julianday(kickoff) > julianday(?)
       AND LOWER(status) IN ('scheduled', 'timed')
     ORDER BY kickoff ASC
   `).all(now());
 
-  const insert = db.prepare(`
-    INSERT INTO predictions(
-      match_id, model_version, created_at,
-      home_prob, draw_prob, away_prob,
-      predicted_home_goals, predicted_away_goals, predicted_result
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  let ensembleCount = 0;
+  let fallbackCount = 0;
+  let skippedCount = 0;
+  let upgradedFallbackCount = 0;
+
+  const findLiveEnsemble = db.prepare(`
+    SELECT id
+    FROM predictions
+    WHERE match_id = ?
+      AND model_version = ?
+      AND prediction_type = 'live'
+    LIMIT 1
+  `);
+
+  const findLiveFallback = db.prepare(`
+    SELECT id
+    FROM predictions
+    WHERE match_id = ?
+      AND model_version = ?
+      AND prediction_type = 'live'
+    LIMIT 1
+  `);
+
+  const updateFallback = db.prepare(`
+    UPDATE predictions
+    SET
+      model_version = ?,
+      created_at = ?,
+      home_prob = ?,
+      draw_prob = ?,
+      away_prob = ?,
+      predicted_home_goals = ?,
+      predicted_away_goals = ?,
+      predicted_result = ?
+    WHERE id = ?
+  `);
+
+  db.transaction(() => {
+    for (const match of matches) {
+      const existingEnsemble = findLiveEnsemble.get(
+        match.id,
+        MODEL_VERSION
+      );
+
+      if (existingEnsemble) {
+        skippedCount++;
+        continue;
+      }
+
+      const priorMatches = getPriorMatches(match);
+      const ensemble = predictEnsemble(match, priorMatches);
+
+      const existingFallback = findLiveFallback.get(
+        match.id,
+        FALLBACK_MODEL_VERSION
+      );
+
+      // Jika prediksi sebelumnya fallback dan kini sudah cukup histori,
+      // perbarui prediksi tersebut menjadi ensemble agar tidak duplikat.
+      if (ensemble && existingFallback) {
+        updateFallback.run(
+          MODEL_VERSION,
+          now(),
+          ensemble.homeProb,
+          ensemble.drawProb,
+          ensemble.awayProb,
+          ensemble.predictedHomeGoals,
+          ensemble.predictedAwayGoals,
+          ensemble.predictedResult,
+          existingFallback.id
+        );
+
+        upgradedFallbackCount++;
+        ensembleCount++;
+        continue;
+      }
+
+      // Jangan menambahkan fallback berulang pada setiap siklus cron.
+      if (!ensemble && existingFallback) {
+        skippedCount++;
+        continue;
+      }
+
+      const prediction = ensemble || fallbackPrediction();
+
+      if (savePrediction(match, prediction, 'live')) {
+        if (ensemble) ensembleCount++;
+        else fallbackCount++;
+      }
+    }
+  })();
+
+  return {
+    model: MODEL_VERSION,
+    threshold: HISTORY_THRESHOLD,
+    weights: {
+      v02: V02_WEIGHT,
+      v04: V04_WEIGHT
+    },
+    calibration: false,
+    matchesChecked: matches.length,
+    ensembleCreated: ensembleCount,
+    fallbackCreated: fallbackCount,
+    fallbackUpgraded: upgradedFallbackCount,
+    alreadyExisting: skippedCount
+  };
+}
+
+// ============================================================
+// HISTORICAL BACKTEST PREDICTIONS
+//
+// Generate retrospective predictions using only matches that
+// started earlier than each target match. These are labelled
+// "backtest" and are reported separately from live predictions.
+// ============================================================
+
+function createBacktestPredictions() {
+  const finishedMatches = db.prepare(`
+    SELECT *
+    FROM matches
+    WHERE LOWER(status) = 'finished'
+      AND home_score IS NOT NULL
+      AND away_score IS NOT NULL
+    ORDER BY kickoff ASC
+  `).all();
+
+  const existingBacktest = db.prepare(`
+    SELECT 1
+    FROM predictions
+    WHERE match_id = ?
+      AND prediction_type = 'backtest'
+    LIMIT 1
+  `);
+
+  const existingLiveEnsemble = db.prepare(`
+    SELECT 1
+    FROM predictions
+    WHERE match_id = ?
+      AND model_version = ?
+      AND prediction_type = 'live'
+    LIMIT 1
   `);
 
   let ensembleCount = 0;
@@ -525,48 +814,33 @@ function createPredictions() {
   let skippedCount = 0;
 
   db.transaction(() => {
-    for (const match of matches) {
-      const existing = db.prepare(`
-        SELECT 1 FROM predictions
-        WHERE match_id = ? AND model_version = ?
-        LIMIT 1
-      `).get(match.id, MODEL_VERSION);
+    for (const match of finishedMatches) {
+      // Jangan buat backtest kedua untuk pertandingan yang sama.
+      if (existingBacktest.get(match.id)) {
+        skippedCount++;
+        continue;
+      }
 
-      if (existing) {
+      // Jika prediksi langsung memang sudah dibuat sebelum pertandingan,
+      // gunakan hasil prediksi langsung itu untuk evaluasi, bukan duplikat backtest.
+      if (existingLiveEnsemble.get(match.id, MODEL_VERSION)) {
         skippedCount++;
         continue;
       }
 
       const priorMatches = getPriorMatches(match);
-      let prediction = predictEnsemble(match, priorMatches);
+      const ensemble = predictEnsemble(match, priorMatches);
+      const prediction = ensemble || fallbackPrediction();
 
-      if (prediction) {
-        ensembleCount++;
-      } else {
-        prediction = fallbackPrediction();
-        fallbackCount++;
+      if (savePrediction(match, prediction, 'backtest')) {
+        if (ensemble) ensembleCount++;
+        else fallbackCount++;
       }
-
-      insert.run(
-        match.id,
-        prediction.modelVersion,
-        now(),
-        prediction.homeProb,
-        prediction.drawProb,
-        prediction.awayProb,
-        prediction.predictedHomeGoals,
-        prediction.predictedAwayGoals,
-        prediction.predictedResult
-      );
     }
   })();
 
   return {
-    model: MODEL_VERSION,
-    threshold: HISTORY_THRESHOLD,
-    weights: { v02: V02_WEIGHT, v04: V04_WEIGHT },
-    calibration: false,
-    matchesChecked: matches.length,
+    matchesChecked: finishedMatches.length,
     ensembleCreated: ensembleCount,
     fallbackCreated: fallbackCount,
     alreadyExisting: skippedCount
@@ -579,37 +853,61 @@ function createPredictions() {
 
 function evaluateFinished() {
   const rows = db.prepare(`
-    SELECT p.*, m.home_score, m.away_score
+    SELECT
+      p.*,
+      m.home_score,
+      m.away_score
     FROM predictions p
     JOIN matches m ON m.id = p.match_id
     WHERE LOWER(m.status) = 'finished'
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
-      AND p.model_version IN ('ensemble_60_40', 'v0.1-fallback')
+      AND p.model_version IN (?, ?)
       AND NOT EXISTS (
-        SELECT 1 FROM evaluations e WHERE e.prediction_id = p.id
+        SELECT 1
+        FROM evaluations e
+        WHERE e.prediction_id = p.id
       )
-  `).all();
+  `).all(MODEL_VERSION, FALLBACK_MODEL_VERSION);
 
   const insert = db.prepare(`
-    INSERT INTO evaluations(
-      prediction_id, evaluated_at, actual_result, exact_score_hit,
-      result_hit, home_goal_error, away_goal_error
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO evaluations (
+      prediction_id,
+      evaluated_at,
+      actual_result,
+      exact_score_hit,
+      result_hit,
+      home_goal_error,
+      away_goal_error
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
   db.transaction(() => {
     for (const row of rows) {
-      const actualResult = result(row.home_score, row.away_score);
+      const actualResult = result(
+        Number(row.home_score),
+        Number(row.away_score)
+      );
+
       const exactScoreHit =
-        Math.round(row.predicted_home_goals) === row.home_score &&
-        Math.round(row.predicted_away_goals) === row.away_score
+        Math.round(Number(row.predicted_home_goals)) ===
+          Number(row.home_score) &&
+        Math.round(Number(row.predicted_away_goals)) ===
+          Number(row.away_score)
           ? 1
           : 0;
 
-      const resultHit = actualResult === row.predicted_result ? 1 : 0;
-      const homeGoalError = Math.abs(row.predicted_home_goals - row.home_score);
-      const awayGoalError = Math.abs(row.predicted_away_goals - row.away_score);
+      const resultHit =
+        actualResult === row.predicted_result ? 1 : 0;
+
+      const homeGoalError = Math.abs(
+        Number(row.predicted_home_goals) - Number(row.home_score)
+      );
+
+      const awayGoalError = Math.abs(
+        Number(row.predicted_away_goals) - Number(row.away_score)
+      );
 
       insert.run(
         row.id,
@@ -623,12 +921,13 @@ function evaluateFinished() {
     }
   })();
 
-  return { evaluated: rows.length };
+  return {
+    evaluated: rows.length
+  };
 }
 
 // ============================================================
 // TEAM-NAME MATCHING
-// Prevent duplicate imports when older matches lack source mappings.
 // ============================================================
 
 function normalizeName(value) {
@@ -640,9 +939,19 @@ function normalizeName(value) {
     .trim();
 }
 
-function findExistingMatch(homeTeam, awayTeam, competition, kickoff) {
+function findExistingMatch(
+  homeTeam,
+  awayTeam,
+  competition,
+  kickoff
+) {
   const rows = db.prepare(`
-    SELECT id, home_team, away_team, competition, kickoff
+    SELECT
+      id,
+      home_team,
+      away_team,
+      competition,
+      kickoff
     FROM matches
     WHERE competition = ?
       AND ABS(
@@ -654,10 +963,27 @@ function findExistingMatch(homeTeam, awayTeam, competition, kickoff) {
   const homeKey = normalizeName(homeTeam);
   const awayKey = normalizeName(awayTeam);
 
-  return rows.find(row =>
-    normalizeName(row.home_team) === homeKey &&
-    normalizeName(row.away_team) === awayKey
+  return rows.find(
+    (row) =>
+      normalizeName(row.home_team) === homeKey &&
+      normalizeName(row.away_team) === awayKey
   ) ?? null;
+}
+
+// ============================================================
+// RUN ALL POST-SYNC TASKS
+// ============================================================
+
+function runPredictionPipeline() {
+  const backtest = createBacktestPredictions();
+  const predictions = createPredictions();
+  const evaluations = evaluateFinished();
+
+  return {
+    backtest,
+    predictions,
+    evaluations
+  };
 }
 
 // ============================================================
@@ -672,32 +998,49 @@ function mockSync() {
   ];
 
   const insertMatch = db.prepare(`
-    INSERT INTO matches(
-      home_team, away_team, competition, kickoff,
-      status, source, updated_at
-    ) VALUES (?, ?, ?, ?, 'scheduled', 'mock', ?)
+    INSERT INTO matches (
+      home_team,
+      away_team,
+      competition,
+      kickoff,
+      status,
+      source,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, 'scheduled', 'mock', ?)
   `);
 
   db.transaction(() => {
     for (const [home, away, competition, daysAhead] of samples) {
+      const existing = db.prepare(`
+        SELECT id
+        FROM matches
+        WHERE home_team = ?
+          AND away_team = ?
+          AND competition = ?
+          AND source = 'mock'
+        LIMIT 1
+      `).get(home, away, competition);
+
+      if (existing) continue;
+
       const kickoff = new Date(
         Date.now() + daysAhead * 86400000
       ).toISOString();
 
-      const existing = findExistingMatch(
-        home, away, competition, kickoff
+      insertMatch.run(
+        home,
+        away,
+        competition,
+        kickoff,
+        now()
       );
-
-      if (!existing) {
-        insertMatch.run(home, away, competition, kickoff, now());
-      }
     }
   })();
 
   return {
     mode: 'mock',
-    predictions: createPredictions(),
-    evaluations: evaluateFinished()
+    ...runPredictionPipeline()
   };
 }
 
@@ -711,6 +1054,7 @@ async function sync() {
   }
 
   const token = process.env.FOOTBALL_DATA_API_TOKEN;
+
   if (!token) {
     throw new Error(
       'FOOTBALL_DATA_API_TOKEN tidak ditemukan di environment variables.'
@@ -718,31 +1062,72 @@ async function sync() {
   }
 
   const competitions = [
-    { code: 'PL', name: 'Premier League' },
-    { code: 'PD', name: 'La Liga' }
+    {
+      code: 'PL',
+      name: 'Premier League'
+    },
+    {
+      code: 'PD',
+      name: 'La Liga'
+    }
   ];
 
   const findSource = db.prepare(`
-    SELECT match_id FROM match_sources
-    WHERE provider = ? AND provider_match_id = ?
+    SELECT match_id
+    FROM match_sources
+    WHERE provider = ?
+      AND provider_match_id = ?
   `);
 
   const insertMatch = db.prepare(`
-    INSERT INTO matches(
-      home_team, away_team, competition, kickoff, status,
-      home_score, away_score, source, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO matches (
+      home_team,
+      away_team,
+      competition,
+      kickoff,
+      status,
+      home_score,
+      away_score,
+      source,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertSource = db.prepare(`
-    INSERT OR IGNORE INTO match_sources(
-      match_id, provider, provider_match_id, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?)
+    INSERT OR IGNORE INTO match_sources (
+      match_id,
+      provider,
+      provider_match_id,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, ?, ?, ?)
   `);
 
-  const updateMatch = db.prepare(`
+  const updateMappedMatch = db.prepare(`
     UPDATE matches
-    SET status = ?, home_score = ?, away_score = ?, updated_at = ?
+    SET
+      home_team = ?,
+      away_team = ?,
+      competition = ?,
+      kickoff = ?,
+      status = ?,
+      home_score = ?,
+      away_score = ?,
+      source = ?,
+      updated_at = ?
+    WHERE id = ?
+  `);
+
+  const updateExistingMatch = db.prepare(`
+    UPDATE matches
+    SET
+      status = ?,
+      home_score = ?,
+      away_score = ?,
+      source = ?,
+      updated_at = ?
     WHERE id = ?
   `);
 
@@ -756,66 +1141,87 @@ async function sync() {
       `https://api.football-data.org/v4/competitions/${competition.code}/matches`;
 
     const response = await fetch(url, {
-      headers: { 'X-Auth-Token': token }
+      headers: {
+        'X-Auth-Token': token
+      }
     });
 
     if (!response.ok) {
       const body = await response.text();
+
       throw new Error(
         `football-data.org ${competition.code} HTTP ${response.status}: ${body.slice(0, 500)}`
       );
     }
 
     const json = await response.json();
-    const providerMatches = Array.isArray(json.matches) ? json.matches : [];
+    const providerMatches = Array.isArray(json.matches)
+      ? json.matches
+      : [];
+
     totalReceived += providerMatches.length;
 
-    for (const match of providerMatches) {
-      const providerMatchId = String(match.id);
-      const homeTeam = match.homeTeam?.name || 'Unknown Home Team';
-      const awayTeam = match.awayTeam?.name || 'Unknown Away Team';
-      const kickoff = match.utcDate;
-      const status = String(match.status || 'SCHEDULED').toLowerCase();
-      const homeScore = match.score?.fullTime?.home ?? null;
-      const awayScore = match.score?.fullTime?.away ?? null;
+    for (const providerMatch of providerMatches) {
+      const match = normalizeProviderMatch(providerMatch);
+
+      if (!match.kickoff) continue;
 
       const mapped = findSource.get(
         'football-data.org',
-        providerMatchId
+        match.providerMatchId
       );
 
       if (mapped) {
-        updateMatch.run(
-          status, homeScore, awayScore, now(), mapped.match_id
+        updateMappedMatch.run(
+          match.homeTeam,
+          match.awayTeam,
+          competition.name,
+          match.kickoff,
+          match.status,
+          match.homeScore,
+          match.awayScore,
+          'football-data.org',
+          now(),
+          mapped.match_id
         );
 
         db.prepare(`
-          UPDATE match_sources SET updated_at = ?
-          WHERE provider = ? AND provider_match_id = ?
-        `).run(now(), 'football-data.org', providerMatchId);
+          UPDATE match_sources
+          SET updated_at = ?
+          WHERE provider = ?
+            AND provider_match_id = ?
+        `).run(
+          now(),
+          'football-data.org',
+          match.providerMatchId
+        );
 
         totalUpdated++;
         continue;
       }
 
-      // Match against existing data before inserting a new row.
       const existingMatch = findExistingMatch(
-        homeTeam,
-        awayTeam,
+        match.homeTeam,
+        match.awayTeam,
         competition.name,
-        kickoff
+        match.kickoff
       );
 
       if (existingMatch) {
         db.transaction(() => {
-          updateMatch.run(
-            status, homeScore, awayScore, now(), existingMatch.id
+          updateExistingMatch.run(
+            match.status,
+            match.homeScore,
+            match.awayScore,
+            'football-data.org',
+            now(),
+            existingMatch.id
           );
 
           insertSource.run(
             existingMatch.id,
             'football-data.org',
-            providerMatchId,
+            match.providerMatchId,
             now(),
             now()
           );
@@ -827,13 +1233,13 @@ async function sync() {
 
       db.transaction(() => {
         const inserted = insertMatch.run(
-          homeTeam,
-          awayTeam,
+          match.homeTeam,
+          match.awayTeam,
           competition.name,
-          kickoff,
-          status,
-          homeScore,
-          awayScore,
+          match.kickoff,
+          match.status,
+          match.homeScore,
+          match.awayScore,
           'football-data.org',
           now()
         );
@@ -841,7 +1247,7 @@ async function sync() {
         insertSource.run(
           Number(inserted.lastInsertRowid),
           'football-data.org',
-          providerMatchId,
+          match.providerMatchId,
           now(),
           now()
         );
@@ -851,6 +1257,8 @@ async function sync() {
     }
   }
 
+  const pipeline = runPredictionPipeline();
+
   return {
     mode: 'football-data.org',
     competitions: ['PL', 'PD'],
@@ -858,8 +1266,7 @@ async function sync() {
     fixtures_imported: totalImported,
     fixtures_updated: totalUpdated,
     existing_matches_linked: totalLinked,
-    predictions: createPredictions(),
-    evaluations: evaluateFinished()
+    ...pipeline
   };
 }
 
@@ -876,7 +1283,10 @@ app.get('/api/health', (req, res) => {
     productionModel: MODEL_VERSION,
     fallbackModel: FALLBACK_MODEL_VERSION,
     threshold: HISTORY_THRESHOLD,
-    weights: { v02: V02_WEIGHT, v04: V04_WEIGHT },
+    weights: {
+      v02: V02_WEIGHT,
+      v04: V04_WEIGHT
+    },
     calibration: false,
     database: DB_PATH
   });
@@ -884,57 +1294,107 @@ app.get('/api/health', (req, res) => {
 
 app.get('/api/matches', (req, res) => {
   try {
-    res.json(db.prepare(`
-      SELECT * FROM matches
+    const scope = String(req.query.scope || 'all').toLowerCase();
+
+    let query = `
+      SELECT *
+      FROM matches
+    `;
+
+    if (scope === 'upcoming') {
+      query += `
+        WHERE julianday(kickoff) >= julianday('now')
+          AND LOWER(status) IN ('scheduled', 'timed')
+      `;
+    } else if (scope === 'finished') {
+      query += `
+        WHERE LOWER(status) = 'finished'
+          AND home_score IS NOT NULL
+          AND away_score IS NOT NULL
+      `;
+    }
+
+    query += `
       ORDER BY kickoff ASC
       LIMIT 100
-    `).all());
+    `;
+
+    res.json(db.prepare(query).all());
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      error: error.message
+    });
   }
 });
 
 app.get('/api/predictions', (req, res) => {
   try {
     res.json(db.prepare(`
-      SELECT p.*, m.home_team, m.away_team, m.competition,
-             m.kickoff, m.status, m.home_score, m.away_score
+      SELECT
+        p.*,
+        m.home_team,
+        m.away_team,
+        m.competition,
+        m.kickoff,
+        m.status,
+        m.home_score,
+        m.away_score
       FROM predictions p
       JOIN matches m ON m.id = p.match_id
-      WHERE p.id IN (
-        SELECT MAX(p2.id)
-        FROM predictions p2
-        GROUP BY p2.match_id
-      )
-        AND m.kickoff >= datetime('now')
+      WHERE p.prediction_type = 'live'
+        AND p.id IN (
+          SELECT MAX(p2.id)
+          FROM predictions p2
+          WHERE p2.prediction_type = 'live'
+          GROUP BY p2.match_id
+        )
+        AND julianday(m.kickoff) >= julianday('now')
         AND LOWER(m.status) IN ('scheduled', 'timed')
       ORDER BY m.kickoff ASC
       LIMIT 100
     `).all());
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      error: error.message
+    });
   }
 });
 
 app.get('/api/evaluations', (req, res) => {
   try {
     res.json(db.prepare(`
-      SELECT e.*, p.model_version, m.home_team, m.away_team,
-             m.home_score, m.away_score
+      SELECT
+        e.*,
+        p.model_version,
+        p.prediction_type,
+        p.predicted_result,
+        p.predicted_home_goals,
+        p.predicted_away_goals,
+        p.home_prob,
+        p.draw_prob,
+        p.away_prob,
+        m.home_team,
+        m.away_team,
+        m.competition,
+        m.kickoff,
+        m.home_score,
+        m.away_score
       FROM evaluations e
       JOIN predictions p ON p.id = e.prediction_id
       JOIN matches m ON m.id = p.match_id
       ORDER BY e.evaluated_at DESC
-      LIMIT 100
+      LIMIT 200
     `).all());
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      error: error.message
+    });
   }
 });
 
 app.get('/api/metrics', (req, res) => {
   try {
-    const metrics = db.prepare(`
+    const metricSql = `
       SELECT
         COUNT(*) AS n,
         COALESCE(AVG(e.result_hit), 0) AS accuracy,
@@ -945,30 +1405,201 @@ app.get('/api/metrics', (req, res) => {
         ) AS goal_mae
       FROM evaluations e
       JOIN predictions p ON p.id = e.prediction_id
-      WHERE p.model_version IN ('ensemble_60_40', 'v0.1-fallback')
-    `).get();
+      WHERE p.model_version IN (?, ?)
+    `;
+
+    const overall = db.prepare(metricSql).get(
+      MODEL_VERSION,
+      FALLBACK_MODEL_VERSION
+    );
+
+    const groupedRows = db.prepare(`
+      SELECT
+        p.prediction_type,
+        p.model_version,
+        COUNT(*) AS n,
+        COALESCE(AVG(e.result_hit), 0) AS accuracy,
+        COALESCE(AVG(e.exact_score_hit), 0) AS exact_score,
+        COALESCE(
+          AVG((e.home_goal_error + e.away_goal_error) / 2.0),
+          0
+        ) AS goal_mae
+      FROM evaluations e
+      JOIN predictions p ON p.id = e.prediction_id
+      WHERE p.model_version IN (?, ?)
+      GROUP BY p.prediction_type, p.model_version
+      ORDER BY p.prediction_type, p.model_version
+    `).all(MODEL_VERSION, FALLBACK_MODEL_VERSION);
+
+    const byType = {
+      live: [],
+      backtest: []
+    };
+
+    for (const row of groupedRows) {
+      const type = row.prediction_type === 'backtest'
+        ? 'backtest'
+        : 'live';
+
+      byType[type].push({
+        model_version: row.model_version,
+        n: row.n,
+        accuracy: row.accuracy,
+        exact_score: row.exact_score,
+        goal_mae: row.goal_mae
+      });
+    }
 
     res.json({
       model: MODEL_VERSION,
       threshold: HISTORY_THRESHOLD,
-      weights: { v02: V02_WEIGHT, v04: V04_WEIGHT },
+      weights: {
+        v02: V02_WEIGHT,
+        v04: V04_WEIGHT
+      },
       calibration: false,
-      ...metrics
+      ...overall,
+      by_type: byType
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({
+      error: error.message
+    });
+  }
+});
+
+app.get('/api/data-quality', (req, res) => {
+  try {
+    const competitions = db.prepare(`
+      SELECT
+        competition,
+        COUNT(*) AS total_matches,
+
+        SUM(
+          CASE
+            WHEN LOWER(status) = 'finished'
+              AND home_score IS NOT NULL
+              AND away_score IS NOT NULL
+            THEN 1 ELSE 0
+          END
+        ) AS finished_with_score,
+
+        SUM(
+          CASE
+            WHEN LOWER(status) IN ('scheduled', 'timed')
+            THEN 1 ELSE 0
+          END
+        ) AS upcoming_matches,
+
+        SUM(
+          CASE
+            WHEN LOWER(status) IN ('scheduled', 'timed')
+              AND (
+                home_score IS NOT NULL
+                OR away_score IS NOT NULL
+              )
+            THEN 1 ELSE 0
+          END
+        ) AS upcoming_with_scores
+
+      FROM matches
+      GROUP BY competition
+      ORDER BY competition
+    `).all();
+
+    const teamRows = db.prepare(`
+      SELECT competition, home_team AS team
+      FROM matches
+
+      UNION
+
+      SELECT competition, away_team AS team
+      FROM matches
+
+      ORDER BY competition, team
+    `).all();
+
+    const teamsByCompetition = {};
+
+    for (const row of teamRows) {
+      if (!teamsByCompetition[row.competition]) {
+        teamsByCompetition[row.competition] = [];
+      }
+
+      teamsByCompetition[row.competition].push(row.team);
+    }
+
+    const sourceCounts = db.prepare(`
+      SELECT
+        COALESCE(source, 'unknown') AS source,
+        COUNT(*) AS matches
+      FROM matches
+      GROUP BY source
+      ORDER BY source
+    `).all();
+
+    const providerMappings = db.prepare(`
+      SELECT
+        provider,
+        COUNT(*) AS mappings
+      FROM match_sources
+      GROUP BY provider
+      ORDER BY provider
+    `).all();
+
+    const duplicates = db.prepare(`
+      SELECT
+        competition,
+        home_team,
+        away_team,
+        kickoff,
+        COUNT(*) AS duplicate_count
+      FROM matches
+      GROUP BY competition, home_team, away_team, kickoff
+      HAVING COUNT(*) > 1
+      ORDER BY duplicate_count DESC
+      LIMIT 50
+    `).all();
+
+    res.json({
+      checked_at: now(),
+      competitions: competitions.map((competition) => ({
+        ...competition,
+        teams: teamsByCompetition[competition.competition] || [],
+        unique_team_count: (
+          teamsByCompetition[competition.competition] || []
+        ).length
+      })),
+      source_counts: sourceCounts,
+      provider_mappings: providerMappings,
+      duplicate_fixtures: duplicates
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: error.message
+    });
   }
 });
 
 app.get('/api/model', (req, res) => {
   res.json({
     model: MODEL_VERSION,
-    components: { V02: V02_WEIGHT, V04: V04_WEIGHT },
+    components: {
+      V02: V02_WEIGHT,
+      V04: V04_WEIGHT
+    },
     threshold: HISTORY_THRESHOLD,
-    calibration: { enabled: false, method: null },
+    calibration: {
+      enabled: false,
+      method: null
+    },
     fallback: FALLBACK_MODEL_VERSION,
     productionChange: true,
-    database: 'SQLite'
+    database: 'SQLite',
+    evaluation: {
+      live: 'Prediksi yang dibuat untuk pertandingan mendatang',
+      backtest: 'Prediksi historis menggunakan pertandingan sebelumnya saja'
+    }
   });
 });
 
@@ -977,7 +1608,10 @@ app.post('/api/admin/sync', async (req, res) => {
     res.json(await sync());
   } catch (error) {
     console.error('[manual-sync]', error);
-    res.status(500).json({ error: error.message });
+
+    res.status(500).json({
+      error: error.message
+    });
   }
 });
 
@@ -990,7 +1624,9 @@ cron.schedule(
   async () => {
     try {
       console.log('[automation] sync started', now());
+
       const data = await sync();
+
       console.log('[automation] sync completed', data);
     } catch (error) {
       console.error('[automation]', error.message);
@@ -1011,6 +1647,10 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('[model] calibration=OFF');
 
   sync()
-    .then(data => console.log('[startup] sync completed', data))
-    .catch(error => console.error('[startup]', error.message));
+    .then((data) => {
+      console.log('[startup] sync completed', data);
+    })
+    .catch((error) => {
+      console.error('[startup]', error.message);
+    });
 });
