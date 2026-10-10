@@ -10,3 +10,14 @@
 *.log
 .DS_Store
 Thumbs.db
+# Local backups and temporary repair scripts
+*.bak
+*.backup-*
+*.db.backup-*
+server.js.backup*
+public/*-backup.*
+patch-admin-auth.cjs
+
+# Local experiment reports and archives
+backtest-*-report.json
+football-lab-review.zip

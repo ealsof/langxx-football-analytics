@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
 import express from 'express';
+import crypto from 'node:crypto';
 import cron from 'node-cron';
 import Database from 'better-sqlite3';
 import path from 'node:path';
@@ -326,7 +327,7 @@ function poissonPrediction(homeGoals, awayGoals) {
 }
 
 // ============================================================
-// V0.2 — SAME-COMPETITION HISTORICAL GOALS
+// V0.2 â€” SAME-COMPETITION HISTORICAL GOALS
 // ============================================================
 
 function predictV02(target, priorMatches) {
@@ -419,7 +420,7 @@ function predictV02(target, priorMatches) {
 }
 
 // ============================================================
-// V0.4 — ELO
+// V0.4 â€” ELO
 // ============================================================
 
 function eloExpected(ratingA, ratingB) {
@@ -863,6 +864,7 @@ function evaluateFinished() {
       AND m.home_score IS NOT NULL
       AND m.away_score IS NOT NULL
       AND p.model_version IN (?, ?)
+      AND p.prediction_type IN ('live', 'backtest')
       AND NOT EXISTS (
         SELECT 1
         FROM evaluations e
@@ -1045,7 +1047,7 @@ function mockSync() {
 }
 
 // ============================================================
-// REAL SYNC — FOOTBALL-DATA.ORG
+// REAL SYNC â€” FOOTBALL-DATA.ORG
 // ============================================================
 
 async function sync() {
@@ -1394,25 +1396,6 @@ app.get('/api/evaluations', (req, res) => {
 
 app.get('/api/metrics', (req, res) => {
   try {
-    const metricSql = `
-      SELECT
-        COUNT(*) AS n,
-        COALESCE(AVG(e.result_hit), 0) AS accuracy,
-        COALESCE(AVG(e.exact_score_hit), 0) AS exact_score,
-        COALESCE(
-          AVG((e.home_goal_error + e.away_goal_error) / 2.0),
-          0
-        ) AS goal_mae
-      FROM evaluations e
-      JOIN predictions p ON p.id = e.prediction_id
-      WHERE p.model_version IN (?, ?)
-    `;
-
-    const overall = db.prepare(metricSql).get(
-      MODEL_VERSION,
-      FALLBACK_MODEL_VERSION
-    );
-
     const groupedRows = db.prepare(`
       SELECT
         p.prediction_type,
@@ -1431,10 +1414,7 @@ app.get('/api/metrics', (req, res) => {
       ORDER BY p.prediction_type, p.model_version
     `).all(MODEL_VERSION, FALLBACK_MODEL_VERSION);
 
-    const byType = {
-      live: [],
-      backtest: []
-    };
+    const byType = { live: [], backtest: [] };
 
     for (const row of groupedRows) {
       const type = row.prediction_type === 'backtest'
@@ -1450,24 +1430,33 @@ app.get('/api/metrics', (req, res) => {
       });
     }
 
+    const overall = groupedRows.find(
+      row =>
+        row.prediction_type === 'backtest' &&
+        row.model_version === MODEL_VERSION
+    );
+
+    const metrics = overall
+      ? {
+          n: overall.n,
+          accuracy: overall.accuracy,
+          exact_score: overall.exact_score,
+          goal_mae: overall.goal_mae
+        }
+      : { n: 0, accuracy: 0, exact_score: 0, goal_mae: 0 };
+
     res.json({
       model: MODEL_VERSION,
       threshold: HISTORY_THRESHOLD,
-      weights: {
-        v02: V02_WEIGHT,
-        v04: V04_WEIGHT
-      },
+      weights: { v02: V02_WEIGHT, v04: V04_WEIGHT },
       calibration: false,
-      ...overall,
+      ...metrics,
       by_type: byType
     });
   } catch (error) {
-    res.status(500).json({
-      error: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 });
-
 app.get('/api/data-quality', (req, res) => {
   try {
     const competitions = db.prepare(`
@@ -1604,22 +1593,42 @@ app.get('/api/model', (req, res) => {
 });
 
 app.post('/api/admin/sync', async (req, res) => {
-  try {
-    res.json(await sync());
-  } catch (error) {
-    console.error('[manual-sync]', error);
+const configuredToken = process.env.ADMIN_TOKEN;
+const suppliedToken = req.get('x-admin-token') || '';
 
-    res.status(500).json({
-      error: error.message
-    });
-  }
+if (!configuredToken) {
+return res.status(503).json({
+error: 'Admin authentication is not configured.'
+});
+}
+
+const expected = Buffer.from(configuredToken, 'utf8');
+const supplied = Buffer.from(suppliedToken, 'utf8');
+
+if (
+expected.length !== supplied.length ||
+!crypto.timingSafeEqual(expected, supplied)
+) {
+return res.status(401).json({
+error: 'Unauthorized.'
+});
+}
+
+try {
+res.json(await sync());
+} catch (error) {
+console.error('[manual-sync]', error);
+res.status(500).json({
+error: 'Manual sync failed.'
+});
+}
 });
 
 // ============================================================
 // AUTOMATED SYNC
 // ============================================================
 
-cron.schedule(
+if (process.env.SKIP_AUTOMATIC_SYNC !== 'true') cron.schedule(
   process.env.SYNC_CRON || '*/15 * * * *',
   async () => {
     try {
@@ -1646,11 +1655,16 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[model] threshold=${HISTORY_THRESHOLD}`);
   console.log('[model] calibration=OFF');
 
-  sync()
-    .then((data) => {
-      console.log('[startup] sync completed', data);
-    })
-    .catch((error) => {
-      console.error('[startup]', error.message);
-    });
+  if (process.env.SKIP_AUTOMATIC_SYNC === 'true') {
+    const pipeline = runPredictionPipeline();
+    console.log('[startup] sync skipped; prediction pipeline completed', pipeline);
+  } else {
+    sync()
+      .then((data) => {
+        console.log('[startup] sync completed', data);
+      })
+      .catch((error) => {
+        console.error('[startup]', error.message);
+      });
+  }
 });
