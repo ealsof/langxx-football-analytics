@@ -541,7 +541,11 @@ function predictionCard(item) {
   </article>`;
 }
 
-function matchCard(item, finished = false) {
+function matchCard(item, finished = false, showPrediction = false) {
+  const predictionAvailable =
+    item.predicted_home_goals != null &&
+    item.predicted_away_goals != null;
+
   return `<article class="match">
     <div class="match-top">
       <span>${escapeHTML(competition(item))}</span>
@@ -554,6 +558,12 @@ function matchCard(item, finished = false) {
     </div>
     <div class="match-bottom">
       <span class="pill ${finished ? "green" : ""}">${finished ? "Skor aktual" : escapeHTML(item.status || "Jadwal")}</span>
+      ${showPrediction
+        ? predictionAvailable
+          ? `<span class="pill">Prediksi awal: ${escapeHTML(item.predicted_home_goals)}–${escapeHTML(item.predicted_away_goals)}</span>
+             <span class="pill">Pilihan model: ${escapeHTML(resultLabel(item.predicted_result))}</span>`
+          : `<span class="pill">Prediksi awal belum tersedia</span>`
+        : ""}
       <span class="muted" style="font-size:11px">ID: ${escapeHTML(item.id ?? "—")}</span>
     </div>
   </article>`;
@@ -643,9 +653,12 @@ function renderPredictions() {
 }
 
 function renderHistory() {
-  const items = filtered(state.finished,"historySearch","historyCompetition");
+  const items = filtered(state.finished,"historySearch","historyCompetition")
+    .slice()
+    .sort((a,b) => new Date(b.kickoff) - new Date(a.kickoff));
+
   $("historyList").innerHTML = items.length
-    ? items.map(item => matchCard(item,true)).join("")
+    ? items.map(item => matchCard(item,true,true)).join("")
     : emptyHTML("Riwayat belum tersedia","Belum ada hasil selesai yang dikembalikan API.");
 }
 

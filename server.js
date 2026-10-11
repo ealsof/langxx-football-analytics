@@ -1299,33 +1299,47 @@ app.get('/api/matches', (req, res) => {
     const scope = String(req.query.scope || 'all').toLowerCase();
 
     let query = `
-      SELECT *
-      FROM matches
+      SELECT
+        m.*,
+        p.model_version AS prediction_model_version,
+        p.prediction_type AS prediction_type,
+        p.predicted_result,
+        p.predicted_home_goals,
+        p.predicted_away_goals,
+        p.home_prob,
+        p.draw_prob,
+        p.away_prob
+      FROM matches m
+      LEFT JOIN predictions p ON p.id = (
+        SELECT p2.id
+        FROM predictions p2
+        WHERE p2.match_id = m.id
+        ORDER BY p2.created_at ASC, p2.id ASC
+        LIMIT 1
+      )
     `;
 
     if (scope === 'upcoming') {
       query += `
-        WHERE julianday(kickoff) >= julianday('now')
-          AND LOWER(status) IN ('scheduled', 'timed')
+        WHERE julianday(m.kickoff) >= julianday('now')
+          AND LOWER(m.status) IN ('scheduled', 'timed')
       `;
     } else if (scope === 'finished') {
       query += `
-        WHERE LOWER(status) = 'finished'
-          AND home_score IS NOT NULL
-          AND away_score IS NOT NULL
+        WHERE LOWER(m.status) = 'finished'
+          AND m.home_score IS NOT NULL
+          AND m.away_score IS NOT NULL
       `;
     }
 
     query += `
-      ORDER BY kickoff ASC
+      ORDER BY ${scope === 'finished' ? 'm.kickoff DESC' : 'm.kickoff ASC'}
       LIMIT 100
     `;
 
     res.json(db.prepare(query).all());
   } catch (error) {
-    res.status(500).json({
-      error: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
